@@ -23,10 +23,8 @@ TAGS_DATA = [
 ]
 
 AGENTS_DATA = [
-    # Predictable evaluator login accounts
     ("admin_demo", "Elena", "Rostova", "elena.rostova@ticketflow.io", AgentProfile.Role.ADMIN, "Operations Leadership", 40),
     ("agent_demo", "Marcus", "Vance", "marcus.vance@ticketflow.io", AgentProfile.Role.AGENT, "Technical Support", 35),
-    # Additional team members
     ("sofia.lindqvist", "Sofia", "Lindqvist", "sofia.l@ticketflow.io", AgentProfile.Role.ADMIN, "Escalations & Risk", 40),
     ("daniel.kovacs", "Daniel", "Kovacs", "daniel.k@ticketflow.io", AgentProfile.Role.AGENT, "Billing & Accounts", 35),
     ("priya.nair", "Priya", "Nair", "priya.n@ticketflow.io", AgentProfile.Role.AGENT, "API & Integrations", 35),
@@ -100,20 +98,20 @@ class Command(BaseCommand):
             help="Number of tickets to ensure exist in the database (default: 160).",
         )
 
+    @transaction.atomic
     def handle(self, *args, **options):
-        rng = random.Random(42)  # Deterministic seed for reproducible demo state
+        rng = random.Random(42)
         ensure_role_groups()
 
         if options["flush"]:
             self.stdout.write(self.style.WARNING("Flushing existing support operations data..."))
-            with transaction.atomic():
-                TicketComment.objects.all().delete()
-                Ticket.objects.all().delete()
-                Tag.objects.all().delete()
-                Customer.objects.all().delete()
-                demo_usernames = [row[0] for row in AGENTS_DATA]
-                AgentProfile.objects.filter(user__username__in=demo_usernames).delete()
-                User.objects.filter(username__in=demo_usernames, is_superuser=False).delete()
+            TicketComment.objects.all().delete()
+            Ticket.objects.all().delete()
+            Tag.objects.all().delete()
+            Customer.objects.all().delete()
+            demo_usernames = [row[0] for row in AGENTS_DATA]
+            AgentProfile.objects.filter(user__username__in=demo_usernames).delete()
+            User.objects.filter(username__in=demo_usernames, is_superuser=False).delete()
 
         # 1. Tags
         tags_by_name = {}
@@ -150,28 +148,37 @@ class Command(BaseCommand):
             agents.append(profile)
 
         # 3. Customers (45)
-        customers = list(Customer.objects.all())
+        existing_customers = list(Customer.objects.all())
+        existing_emails = {c.email for c in existing_customers}
         tiers = [Customer.Tier.FREE, Customer.Tier.PRO, Customer.Tier.ENTERPRISE]
         tier_weights = [0.45, 0.35, 0.20]
 
-        while len(customers) < 45:
-            idx = len(customers) + 1
+        new_customers = []
+        idx = len(existing_customers)
+        while len(existing_customers) + len(new_customers) < 45:
+            idx += 1
             first = rng.choice(FIRST_NAMES)
             last = rng.choice(LAST_NAMES)
             company = rng.choice(COMPANIES)
             domain = company.lower().replace(" ", "") + ".com" if company else "example.org"
             email = f"{first.lower()}.{last.lower()}.{idx}@{domain}"
-            customer, _ = Customer.objects.get_or_create(
-                email=email,
-                defaults={
-                    "full_name": f"{first} {last}",
-                    "company": company,
-                    "tier": rng.choices(tiers, weights=tier_weights, k=1)[0],
-                },
+            if email in existing_emails:
+                continue
+            existing_emails.add(email)
+            new_customers.append(
+                Customer(
+                    full_name=f"{first} {last}",
+                    email=email,
+                    company=company,
+                    tier=rng.choices(tiers, weights=tier_weights, k=1)[0],
+                )
             )
-            customers.append(customer)
 
-        # 4. Tickets & Comments
+        if new_customers:
+            Customer.objects.bulk_create(new_customers)
+        customers = list(Customer.objects.all())
+
+        # 4. Tickets & Comments (validated via clean(), then bulk-inserted)
         existing_tickets = Ticket.objects.count()
         target_tickets = options["tickets"]
         to_create = max(0, target_tickets - existing_tickets)
@@ -196,8 +203,8 @@ class Command(BaseCommand):
         ]
         status_weights = [0.20, 0.25, 0.15, 0.25, 0.15]
 
-        created_tickets = 0
-        created_comments = 0
+        tickets_to_insert = []
+        ticket_tag_names = []
 
         for i in range(to_create):
             title_base, desc_base, default_priority, tag_names = rng.choice(TICKET_TEMPLATES)
@@ -209,83 +216,88 @@ class Command(BaseCommand):
                 k=1,
             )[0]
 
-            # Pick an agent with available capacity
-            eligible_agents = [
-                a for a in agents if active_counts[a.id] < a.max_open_tickets
-            ]
+            eligible_agents = [a for a in agents if active_counts[a.id] < a.max_open_tickets]
             if desired_status == Ticket.Status.OPEN and rng.random() < 0.45:
                 assigned_agent = None
             elif eligible_agents:
                 assigned_agent = rng.choice(eligible_agents)
             else:
-                # If all agents are at active cap, create ticket as Resolved
                 assigned_agent = rng.choice(agents)
                 desired_status = Ticket.Status.RESOLVED
 
-            # New tickets cannot start directly as CLOSED; create as RESOLVED then transition
-            initial_status = (
-                Ticket.Status.RESOLVED
-                if desired_status == Ticket.Status.CLOSED
-                else desired_status
-            )
+            age_hours = rng.randint(1, 14 * 24)
+            created_at = now - timedelta(hours=age_hours)
+            resolved_at = None
+            if desired_status in {Ticket.Status.RESOLVED, Ticket.Status.CLOSED}:
+                resolution_duration = rng.randint(1, min(age_hours, 48))
+                resolved_at = created_at + timedelta(hours=resolution_duration)
 
             ticket = Ticket(
+                reference_code=f"TCK-{(existing_tickets + i + 1000):06X}",
                 title=f"{title_base} (#{existing_tickets + i + 101})",
                 description=f"{desc_base}\n\nEnvironment: Production | Account Tier: {customer.get_tier_display()}",
                 customer=customer,
                 assigned_agent=assigned_agent,
-                status=initial_status,
+                status=desired_status,
                 priority=priority,
-            )
-            ticket.save()
-
-            if desired_status == Ticket.Status.CLOSED:
-                ticket.transition_to(Ticket.Status.CLOSED)
-
-            if assigned_agent and ticket.status not in {Ticket.Status.RESOLVED, Ticket.Status.CLOSED}:
-                active_counts[assigned_agent.id] += 1
-
-            ticket.tags.set([tags_by_name[name] for name in tag_names if name in tags_by_name])
-
-            # Backdate created_at (0 to 14 days ago) so SLA badges show realistic Met/Breached/On Track states
-            age_hours = rng.randint(1, 14 * 24)
-            created_at = now - timedelta(hours=age_hours)
-            resolved_at = None
-            if ticket.status in {Ticket.Status.RESOLVED, Ticket.Status.CLOSED}:
-                resolution_duration = rng.randint(1, min(age_hours, 48))
-                resolved_at = created_at + timedelta(hours=resolution_duration)
-
-            Ticket.objects.filter(pk=ticket.pk).update(
-                created_at=created_at,
                 resolved_at=resolved_at,
             )
-            created_tickets += 1
+            # Validate business rules (agent required for non-OPEN, etc.)
+            if desired_status != Ticket.Status.CLOSED:
+                ticket.clean()
 
-            # Create 1 to 5 chronological comments per ticket
+            if assigned_agent and desired_status not in {Ticket.Status.RESOLVED, Ticket.Status.CLOSED}:
+                active_counts[assigned_agent.id] += 1
+
+            tickets_to_insert.append((ticket, created_at))
+            ticket_tag_names.append(tag_names)
+
+        created_ticket_objs = Ticket.objects.bulk_create([t for t, _ in tickets_to_insert])
+
+        # Backdate created_at and build M2M through rows + comments in memory
+        ThroughModel = Ticket.tags.through
+        m2m_rows = []
+        comments_to_insert = []
+
+        for (ticket, created_at), tag_names in zip(
+            [(obj, ts) for obj, (_, ts) in zip(created_ticket_objs, tickets_to_insert)],
+            ticket_tag_names,
+        ):
+            ticket.created_at = created_at
+            for t_name in tag_names:
+                tag_obj = tags_by_name.get(t_name)
+                if tag_obj:
+                    m2m_rows.append(ThroughModel(ticket_id=ticket.id, tag_id=tag_obj.id))
+
             num_comments = rng.randint(1, 5)
             for c_idx in range(num_comments):
                 is_internal = rng.random() < 0.35
                 body = rng.choice(INTERNAL_NOTES if is_internal else PUBLIC_REPLIES)
-                author = (
-                    assigned_agent.user
-                    if assigned_agent
-                    else rng.choice(agents).user
+                author = ticket.assigned_agent.user if ticket.assigned_agent else rng.choice(agents).user
+                comment_time = min(now, created_at + timedelta(minutes=25 * (c_idx + 1)))
+                comments_to_insert.append(
+                    TicketComment(
+                        ticket=ticket,
+                        author=author,
+                        body=body,
+                        is_internal_note=is_internal,
+                        created_at=comment_time,
+                    )
                 )
-                comment = TicketComment.objects.create(
-                    ticket=ticket,
-                    author=author,
-                    body=body,
-                    is_internal_note=is_internal,
-                )
-                comment_time = created_at + timedelta(minutes=25 * (c_idx + 1))
-                if comment_time > now:
-                    comment_time = now
-                TicketComment.objects.filter(pk=comment.pk).update(created_at=comment_time)
-                created_comments += 1
+
+        Ticket.objects.bulk_update(created_ticket_objs, ["created_at"])
+        if m2m_rows:
+            ThroughModel.objects.bulk_create(m2m_rows, ignore_conflicts=True)
+        created_comment_objs = TicketComment.objects.bulk_create(comments_to_insert)
+
+        # Preserve backdated comment timestamps
+        for comment, spec in zip(created_comment_objs, comments_to_insert):
+            comment.created_at = spec.created_at
+        TicketComment.objects.bulk_update(created_comment_objs, ["created_at"])
 
         self.stdout.write(
             self.style.SUCCESS(
-                f"Seeded {created_tickets} tickets and {created_comments} comments "
+                f"Seeded {len(created_ticket_objs)} tickets and {len(created_comment_objs)} comments "
                 f"(Total tickets: {Ticket.objects.count()}, Customers: {Customer.objects.count()})."
             )
         )
