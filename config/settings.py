@@ -43,7 +43,7 @@ INSTALLED_APPS = [
     "whitenoise.runserver_nostatic",
     "django.contrib.staticfiles",
     "storages",
-    "tickets.apps.TicketsConfig",
+    "ticketsApp.apps.TicketsappConfig",
 ]
 
 MIDDLEWARE = [
