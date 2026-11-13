@@ -1,0 +1,149 @@
+{% extends "admin/base.html" %}
+
+{% block title %}{% if subtitle %}{{ subtitle }} | {% endif %}{{ title }} | {{ site_title|default:_('Django site admin') }}{% endblock %}
+
+{% block branding %}
+<div id="site-name"><a href="{% url 'admin:index' %}">{{ site_header|default:_('Django administration') }}</a></div>
+{% if user.is_anonymous %}
+  {% include "admin/color_theme_toggle.html" %}
+{% endif %}
+{% endblock %}
+
+{% block footer %}
+{{ block.super }}
+{% if request.user.is_authenticated and request.user.is_staff %}
+<div id="tf-ai-widget" style="position:fixed;bottom:18px;right:18px;z-index:9999;font-family:system-ui,-apple-system,sans-serif;">
+  <button
+    id="tf-ai-toggle"
+    type="button"
+    style="background:#1E40AF;color:#fff;border:none;border-radius:999px;padding:10px 16px;font-size:13px;font-weight:600;cursor:pointer;box-shadow:0 4px 12px rgba(0,0,0,0.2);"
+  >
+    Form Field Assistant
+  </button>
+
+  <div
+    id="tf-ai-panel"
+    style="display:none;width:350px;background:#ffffff;color:#111827;border:1px solid #D1D5DB;border-radius:10px;box-shadow:0 10px 25px rgba(0,0,0,0.18);margin-top:8px;overflow:hidden;"
+  >
+    <div style="background:#1E3A8A;color:#fff;padding:10px 14px;display:flex;justify-content:space-between;align-items:center;">
+      <strong style="font-size:13px;">Admin Form Assistant</strong>
+      <span id="tf-ai-model-badge" style="font-size:11px;background:rgba(255,255,255,0.2);padding:2px 7px;border-radius:4px;">Ticket</span>
+    </div>
+
+    <div id="tf-ai-messages" style="padding:12px;max-height:240px;overflow-y:auto;font-size:12.5px;line-height:1.45;background:#F9FAFB;">
+      <div style="color:#4B5563;">
+        Ask what any field means, allowed file types, or status transition rules for this form.
+      </div>
+    </div>
+
+    <form id="tf-ai-form" style="display:flex;border-top:1px solid #E5E7EB;padding:8px;gap:6px;background:#fff;">
+      <input
+        id="tf-ai-input"
+        type="text"
+        maxlength="500"
+        placeholder="e.g. Why can't I set status to Closed?"
+        style="flex:1;padding:7px 9px;border:1px solid #D1D5DB;border-radius:6px;font-size:12.5px;color:#111827;background:#fff;"
+        required
+      />
+      <button
+        id="tf-ai-submit"
+        type="submit"
+        style="background:#1E40AF;color:#fff;border:none;border-radius:6px;padding:7px 12px;font-size:12.5px;font-weight:600;cursor:pointer;"
+      >
+        Ask
+      </button>
+    </form>
+  </div>
+</div>
+
+<script>
+(function () {
+  const toggleBtn = document.getElementById("tf-ai-toggle");
+  const panel = document.getElementById("tf-ai-panel");
+  const form = document.getElementById("tf-ai-form");
+  const input = document.getElementById("tf-ai-input");
+  const messagesEl = document.getElementById("tf-ai-messages");
+  const badgeEl = document.getElementById("tf-ai-model-badge");
+
+  function detectActiveModel() {
+    const path = window.location.pathname.toLowerCase();
+    if (path.includes("/customer/")) return "customer";
+    if (path.includes("/agentprofile/")) return "agentprofile";
+    if (path.includes("/tag/")) return "tag";
+    return "ticket";
+  }
+
+  function getCookie(name) {
+    const match = document.cookie.match(new RegExp("(^| )" + name + "=([^;]+)"));
+    return match ? decodeURIComponent(match[2]) : "";
+  }
+
+  function appendMessage(sender, text, meta) {
+    const wrapper = document.createElement("div");
+    wrapper.style.marginBottom = "10px";
+    wrapper.style.padding = "8px 10px";
+    wrapper.style.borderRadius = "6px";
+    wrapper.style.background = sender === "You" ? "#DBEAFE" : "#FFFFFF";
+    wrapper.style.border = "1px solid #E5E7EB";
+    wrapper.style.whiteSpace = "pre-line";
+
+    const header = document.createElement("div");
+    header.style.fontWeight = "700";
+    header.style.fontSize = "11px";
+    header.style.marginBottom = "3px";
+    header.style.color = "#374151";
+    header.textContent = meta ? sender + " (" + meta + ")" : sender;
+
+    const body = document.createElement("div");
+    body.textContent = text;
+
+    wrapper.appendChild(header);
+    wrapper.appendChild(body);
+    messagesEl.appendChild(wrapper);
+    messagesEl.scrollTop = messagesEl.scrollHeight;
+  }
+
+  toggleBtn.addEventListener("click", function () {
+    const isHidden = panel.style.display === "none";
+    panel.style.display = isHidden ? "block" : "none";
+    const activeModel = detectActiveModel();
+    badgeEl.textContent = activeModel.toUpperCase();
+    if (isHidden) input.focus();
+  });
+
+  form.addEventListener("submit", async function (e) {
+    e.preventDefault();
+    const question = input.value.trim();
+    if (!question) return;
+
+    const activeModel = detectActiveModel();
+    appendMessage("You", question);
+    input.value = "";
+    input.disabled = true;
+
+    try {
+      const resp = await fetch("{% url 'admin_ai_assist' %}", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-CSRFToken": getCookie("csrftoken"),
+        },
+        body: JSON.stringify({ question: question, model: activeModel }),
+      });
+      const data = await resp.json();
+      if (!resp.ok) {
+        appendMessage("Assistant", data.error || "Unable to process request right now.");
+      } else {
+        appendMessage("Assistant", data.answer, data.source);
+      }
+    } catch (err) {
+      appendMessage("Assistant", "Network error reaching the assistant endpoint.");
+    } finally {
+      input.disabled = false;
+      input.focus();
+    }
+  });
+})();
+</script>
+{% endif %}
+{% endblock %}

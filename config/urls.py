@@ -5,6 +5,8 @@ from django.http import JsonResponse
 from django.urls import path
 from django.views.generic import RedirectView
 
+from ticketsApp.views import admin_ai_assist_view
+
 
 def health_check(request):
     return JsonResponse({"status": "ok"})
@@ -13,6 +15,7 @@ def health_check(request):
 urlpatterns = [
     path("", RedirectView.as_view(url="/admin/", permanent=False)),
     path("health/", health_check, name="health_check"),
+    path("admin/ai-assist/", admin_ai_assist_view, name="admin_ai_assist"),
     path("admin/", admin.site.urls),
 ]
 
