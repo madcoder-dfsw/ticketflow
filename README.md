@@ -4,7 +4,7 @@ A production-configured Django support ticket tracking application featuring a c
 
 ## Live Demo & Evaluator Credentials
 
-* **Live URL:** `<replace-with-your-deployed-url>/admin/`
+* **Live URL:** `https://ticketflow-96pe.onrender.com/`
 * **Support Admin (Full Access):** `admin_demo` / `AdminPass123!`
 * **Support Agent (Restricted Queue & Read-Only Triage):** `agent_demo` / `AgentPass123!`
 
